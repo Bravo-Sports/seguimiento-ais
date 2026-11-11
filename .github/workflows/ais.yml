@@ -1,0 +1,47 @@
+# Con el barco sin internet, la web (bravo-sports.github.io) sigue al barco y a los rivales por el AIS de internet.
+# Ver README.md. El log es PUBLICO: el script no imprime posiciones ni nombres.
+name: seguimiento por AIS
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+concurrency:
+  group: ais
+  cancel-in-progress: false
+permissions:
+  contents: write          # solo para el commit "sigue vivo" en este repositorio
+jobs:
+  ais:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -q cryptography websockets
+      - name: clon de la web
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/web && chmod 600 ~/.ssh/web
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/web -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+      - run: git clone -q --depth 1 git@github.com:Bravo-Sports/bravo-sports.github.io.git web
+      - name: AIS
+        env:
+          CLAVE_WEB: ${{ secrets.CLAVE_WEB }}
+          AISSTREAM: ${{ secrets.AISSTREAM }}
+          MMSI: ${{ vars.MMSI }}
+        run: python3 seguimiento_ais.py web
+      - name: sube
+        run: |
+          cd web
+          git diff --quiet && exit 0
+          git -c user.name=AIS -c user.email=ais@localhost commit -qam "AIS"
+          # si la Pi ha subido entretanto, se rechaza y manda la suya: no se reintenta
+          git push -q origin HEAD:main || echo "la Pi ha subido entretanto"
+      - name: sigue vivo
+        # GitHub apaga las tareas programadas de un repositorio publico sin commits en 60 dias
+        run: |
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 2592000 ]; then
+            git -c user.name=AIS -c user.email=ais@localhost commit -q --allow-empty -m "sigue vivo"
+            git push -q
+          fi
