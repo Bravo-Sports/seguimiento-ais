@@ -44,6 +44,7 @@ REGATA = "http://127.0.0.1:8091/regata"
 SUGERIDA = "http://127.0.0.1:8091/sugerida"               # la ruta que ha calculado la app
 GRIB_CORR = os.path.expanduser("~/gribs/corrientes_estrecho.grb")   # IBI, ~2,8 km (corrientes_estrecho.sh)
 PAGINA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seguimiento.html")
+ICONO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seguimiento_icono.png")   # el de la pantalla de inicio del movil
 HORAS = 48                      # rastro que se enseña
 PASO_M, PASO_S = 100, 3600      # se apunta y se sube con 100 m de movimiento o una hora
 KN = 1.943844                   # m/s -> nudos
@@ -233,11 +234,21 @@ def a_bordo(sk, b, ahora, hist, dir_app):
 
 
 def garreo(f, b):
-    """El fondeo de la app [lat, lon, radio] con la distancia del barco y si esta fuera del radio."""
+    """El fondeo de la app [lat, lon, radio, (radio corto, sectores)] con la distancia del barco y si
+    esta fuera. Sectores (como tactica/Fondeo.java): 8 de 45 grados vistos desde el ancla (bit 0 = N,
+    1 = NE...); los marcados usan el radio corto."""
     if not f:
         return None
-    d = dist_m((f[0], f[1]), (b["lat"], b["lon"])) if b else None
-    return {"lat": f[0], "lon": f[1], "radio": f[2], "dist": None if d is None else round(d), "fuera": d is not None and d > f[2]}
+    corto, sect = (f[3], int(f[4])) if len(f) >= 5 else (f[2], 0)
+    out = {"lat": f[0], "lon": f[1], "radio": f[2], "dist": None, "fuera": False}
+    if sect:
+        out.update(corto=corto, sectores=sect)
+    if b:
+        d = dist_m((f[0], f[1]), (b["lat"], b["lon"]))
+        rumbo = math.degrees(math.atan2((b["lon"] - f[1]) * math.cos(math.radians(f[0])), b["lat"] - f[0])) % 360
+        radio = corto if sect >> int((rumbo + 22.5) % 360 // 45) & 1 else f[2]
+        out.update(dist=round(d), fuera=d > radio, limite=radio)
+    return out
 
 
 def serie(s, b, bordo, ahora, horas=24):
@@ -517,7 +528,7 @@ def main():
         return                                       # sin repositorio: seguimiento web apagado
     # se sube si el barco o un rival se ha movido ~100 m, si cambia la regata o la prevision, o cada hora
     firma = json.dumps([b and (round(b["lat"], 3), round(b["lon"], 3)), [(r["nombre"], round(r["lat"], 3), round(r["lon"], 3)) for r in rivales],
-                        regata, nogo, fondeo and (fondeo["lat"], fondeo["radio"], fondeo["fuera"]), met.get("generado"), met.get("avisos"), sug.get("seq"),
+                        regata, nogo, fondeo and (fondeo["lat"], fondeo["radio"], fondeo.get("corto"), fondeo.get("sectores"), fondeo["fuera"]), met.get("generado"), met.get("avisos"), sug.get("seq"),
                         cg and [x["t"] for x in cg["pasos"]], cg and cg["pasos"][0]["puntos"][:3],
                         hashlib.md5(pagina).hexdigest(), cambio_clave, corr_h], ensure_ascii=False)
     antes = lee_json(fs, {})
@@ -525,7 +536,8 @@ def main():
         return
     sube_git(os.path.join(DIR, "web"), open(REPO, encoding="utf-8").read().strip(),
              dict({"index.html": pagina, "datos.json": json.dumps(envio, ensure_ascii=False, separators=(",", ":")).encode()},
-                  **({"corriente.json": corr_bytes} if corr_bytes else {})), CLAVE if os.path.exists(CLAVE) else None)
+                  **({"corriente.json": corr_bytes} if corr_bytes else {}),
+                  **({"icono.png": open(ICONO, "rb").read()} if os.path.exists(ICONO) else {})), CLAVE if os.path.exists(CLAVE) else None)
     guarda_json(fs, {"firma": firma, "t": ahora})
     print("subido: %s, %d rivales, %d puntos" % ("sin GPS" if not b else "%.5f, %.5f" % (b["lat"], b["lon"]), len(rivales), len(rastro)))
 
