@@ -46,6 +46,7 @@ GRIB_CORR = os.path.expanduser("~/gribs/corrientes_estrecho.grb")   # IBI, ~2,8 
 PAGINA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seguimiento.html")
 ICONO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seguimiento_icono.png")   # el de la pantalla de inicio del movil
 HORAS = 48                      # rastro que se enseña
+MIN_4G_S = 600                  # por el 4G, minimo entre subidas
 PASO_M, PASO_S = 100, 3600      # se apunta y se sube con 100 m de movimiento o una hora
 KN = 1.943844                   # m/s -> nudos
 
@@ -425,12 +426,22 @@ def url_json(url):
         return None
 
 
+def por_4g():
+    """True si el router va por el 4G (/run/h2000-enlace, lo escribe ais-wifi.service cada 5 min)."""
+    try:
+        with open("/run/h2000-enlace") as f:
+            return f.read().strip() != "wifi"
+    except OSError:
+        return False
+
+
 def sube_git(dir_web, url, ficheros, clave=None):
     """Deja 'ficheros' {nombre: bytes} en el repositorio 'url' como UN solo commit (push --force):
     cada subida sustituye a la anterior y no queda historial. 'clave': deploy key SSH."""
     env = dict(os.environ)
     if clave:
-        env["GIT_SSH_COMMAND"] = "ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" % clave
+        env["GIT_SSH_COMMAND"] = ("ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"     # con red mala:
+                                  " -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" % clave)  # corta, no 120 s
 
     def git(*a):
         subprocess.run(["git", "-C", dir_web] + list(a), check=True, env=env, capture_output=True, timeout=120)
@@ -441,6 +452,8 @@ def sube_git(dir_web, url, ficheros, clave=None):
         git("config", "user.name", "Barco")
         git("config", "user.email", "barco@localhost")
     git("remote", "set-url", "origin", url)              # si ~/.seguimiento-repo cambia, sube al nuevo
+    git("config", "core.logAllRefUpdates", "false")      # sin reflog ni gc automatico: cada commit huerfano
+    git("config", "gc.auto", "0")                        # se borra tras el push (abajo), la SD no crece
     for n, d in ficheros.items():
         with open(os.path.join(dir_web, n), "wb") as fh:
             fh.write(d)
@@ -449,6 +462,8 @@ def sube_git(dir_web, url, ficheros, clave=None):
     git("commit", "-q", "-m", "seguimiento")
     git("branch", "-M", "main")
     git("push", "-q", "--force", "origin", "main")
+    git("reflog", "expire", "--expire=now", "--all")      # fuera los commits viejos (inalcanzables)
+    git("prune", "--expire=now")
 
 
 def main():
@@ -528,11 +543,15 @@ def main():
         return                                       # sin repositorio: seguimiento web apagado
     # se sube si el barco o un rival se ha movido ~100 m, si cambia la regata o la prevision, o cada hora
     firma = json.dumps([b and (round(b["lat"], 3), round(b["lon"], 3)), [(r["nombre"], round(r["lat"], 3), round(r["lon"], 3)) for r in rivales],
-                        regata, nogo, fondeo and (fondeo["lat"], fondeo["radio"], fondeo.get("corto"), fondeo.get("sectores"), fondeo["fuera"]), met.get("generado"), met.get("avisos"), sug.get("seq"),
+                        regata, nogo, fondeo and (fondeo["lat"], fondeo["radio"], fondeo.get("corto"), fondeo.get("sectores"), fondeo["fuera"]), met.get("bloques"), met.get("aviso"), met.get("avisos"), sug.get("seq"),
                         cg and [x["t"] for x in cg["pasos"]], cg and cg["pasos"][0]["puntos"][:3],
                         hashlib.md5(pagina).hexdigest(), cambio_clave, corr_h], ensure_ascii=False)
     antes = lee_json(fs, {})
     if not cambia and firma == antes.get("firma") and ahora - antes.get("t", 0) < PASO_S:
+        return
+    # Por el 4G (datos limitados) como mucho una subida cada 10 min navegando (cada una ~60 kB); el rastro
+    # se sigue apuntando en local y va en la siguiente. Un garreo sube siempre.
+    if por_4g() and ahora - antes.get("t", 0) < MIN_4G_S and not (fondeo and fondeo.get("fuera")):
         return
     sube_git(os.path.join(DIR, "web"), open(REPO, encoding="utf-8").read().strip(),
              dict({"index.html": pagina, "datos.json": json.dumps(envio, ensure_ascii=False, separators=(",", ":")).encode()},
